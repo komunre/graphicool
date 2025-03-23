@@ -1,4 +1,3 @@
-use vecmath::*;
 use std::collections::HashMap;
 
 pub struct GlobalResources {
