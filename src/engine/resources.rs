@@ -36,10 +36,17 @@ impl Default for GlobalResources {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pos: [f32; 3],
-    tex_coord: [f32; 2],
-    normals: [f32; 3],
+    pub pos: [f32; 3],
+    pub tex_coord: [f32; 2],
+    pub normals: [f32; 3],
 }
+
+// Use Vertex::zeroed() instead
+/*impl Default for Vertex {
+    fn default() -> Self {
+        Vertex { pos: [0.0;3], tex_coord: [0.0;2], normals: [0.0;3] }
+    }
+}*/
 
 impl Vertex {
     pub fn new(pos: [f32; 3], tex_coord: [f32; 2], normals: [f32; 3]) -> Self {
@@ -123,6 +130,10 @@ impl Mesh {
 
     pub fn texture(&self) -> &Option<TextureHandle> {
         &self.texture
+    }
+
+    pub fn set_texture(&mut self, texture: TextureHandle) {
+        self.texture = Some(texture);
     }
 }
 

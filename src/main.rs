@@ -1,6 +1,7 @@
-use std::{fs::File, io::Read, str::FromStr, sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}, borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, fs::File, io::{BufReader, Read}, mem::transmute, path::{Path, PathBuf}, rc::Rc, str::FromStr, sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}};
 
-use wgpu::{RenderPass, util::DeviceExt};
+use bytemuck::Zeroable;
+use wgpu::{naga::proc::index, util::{align_to, DeviceExt}, RenderPass};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -139,10 +140,11 @@ impl WindowState {
         });
 
         // Draw calls here
-        let Ok(name) = String::from_str("billboard");
-        let shader = resources.read().unwrap().shaders().get(&name).unwrap().clone();
-        for mesh in resources.read().unwrap().meshes() {
-            self.render_mesh(&shader, &mut renderpass, mesh);
+        let resource_read =  resources.read().unwrap();
+        for mesh in resource_read.meshes() {
+            let name = mesh.shader_name();
+            let shader: &wgpu::ShaderModule = resource_read.shaders().get(name).unwrap();
+            self.render_mesh(shader, &mut renderpass, mesh);
         }
         //}
         // End the renderpass
@@ -189,10 +191,10 @@ impl WindowState {
                 targets: &[Some(swapchain_format.into())]
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip, // wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: Some(wgpu::IndexFormat::Uint32), // TODO: A toggle between u16 and u32 // u32 indices list for extended indice count maximum (more memory usage)
+                topology: wgpu::PrimitiveTopology::TriangleList, // wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None, // TODO: A toggle between u16 and u32 // u32 indices list for extended indice count maximum (more memory usage)
                 front_face: wgpu::FrontFace::Ccw, // Counter-clockwise front
-                cull_mode: None, // Some(wgpu::Face::Back), // Cull back
+                cull_mode: Some(wgpu::Face::Back), // Some(wgpu::Face::Back), // Cull back --- None // Cull nothing
                 unclipped_depth: false, // When set to false clips depth to 0-1. Unclipped depth requires `Features::DEPTH_CLIP_CONTROL` to be enabled
                 polygon_mode: wgpu::PolygonMode::Fill, // PolygonMode::Fill means rasterization
                 conservative: false,
@@ -217,7 +219,7 @@ impl WindowState {
             None => ()
         }
         
-        render_pass.draw_indexed(0..6, 0, 0..1);
+        render_pass.draw_indexed(0..mesh.indices().len() as u32, 0, 0..1);
         //render_pass.draw(0..3, 0..1);
     }
 }
@@ -237,6 +239,42 @@ struct App {
         app
     }
 }*/
+
+fn u8vec_to_f32vec(input: Vec<u8>) -> Vec<f32> {
+    let mut output = Vec::with_capacity(input.len() / 4);
+    let mut i = 0;
+    while i < input.len() {
+        let arr = [input[i], input[i + 1], input[i + 2], input[i + 3]];
+        let v = f32::from_le_bytes(arr);
+        i += 4;
+        output.push(v);
+    }
+    return output;
+}
+
+fn u8vec_to_u32vec(input: Vec<u8>) -> Vec<u32> {
+    let mut output = Vec::with_capacity(input.len() / 4);
+    let mut i = 0;
+    while i < input.len() {
+        let arr = [input[i], input[i + 1], input[i + 2], input[i + 3]];
+        let v = u32::from_le_bytes(arr);
+        i += 4;
+        output.push(v);
+    }
+    return output;
+}
+
+fn u8vec_to_u16vec(input: Vec<u8>) -> Vec<u16> {
+    let mut output = Vec::with_capacity(input.len() / 2);
+    let mut i = 0;
+    while i < input.len() {
+        let arr = [input[i], input[i + 1]];
+        let v = u16::from_le_bytes(arr);
+        i += 2;
+        output.push(v);
+    }
+    return output;
+}
 
 impl App {
     pub fn create_billboard(&mut self, dimensions: Vector2<f32>, texture: Option<TextureHandle>) -> Mesh {
@@ -426,83 +464,444 @@ impl App {
     }
     
     // GLTF is hard.
-    pub fn load_model(&mut self, path: &str) -> Result<Mesh, gltf::Error> {
-        //self.state.as_ref().unwrap().device.create_bind_group()
+    pub fn load_model(&mut self, path: &str) -> Result<Vec<Mesh>, gltf::Error> {
+        println!("Loading GLTF model by path of {}", path);
 
-        let gltf = gltf::Gltf::open(path)?;
+        let gltf_path = Path::new(path);
+        let file_seek_path = gltf_path.parent().unwrap_or(Path::new("./"));
+        let gltf = gltf::Gltf::open(gltf_path)?;
 
-        let verts: Vec<Vertex> = Vec::new();
+        let binary_payload = gltf.blob.clone();
+
+        fn access_buffer(view: &gltf::buffer::View, accessor: &gltf::Accessor, buffer_cache: &HashMap<usize, Vec<u8>>, binary_payload: &Option<Vec<u8>>) -> Vec<u8> {
+            let buffer = view.buffer();
+
+            let accessor_offset = accessor.offset();
+            let view_offset = view.offset();
+            let full_offset = accessor_offset + view_offset;
+
+            let view_length = view.length();
+
+            match buffer.source() {
+                gltf::buffer::Source::Uri(uri) => {
+                    let cached_data = buffer_cache.get(&buffer.index());
+                    match cached_data {
+                        Some(v) => {
+                            let slice = v[full_offset..full_offset+view_length].to_vec();
+                            return slice;
+                        }
+                        None => return Vec::new()
+                    }
+                },
+                gltf::buffer::Source::Bin => {
+                    // TODO: return from bin
+                    match binary_payload {
+                        Some(payload) => {
+                            let slice = payload[full_offset..full_offset+view_length].to_vec();
+                            //println!("Returning binary slice of: {:?}", slice);
+                            return slice;
+                        }
+                        None => panic!("No binary blob present despite GLTF containing binary data reference")
+                    }
+                }
+            }
+        }
+
+        fn cache_buffer(buffer: &gltf::Buffer, buffer_cache: &mut HashMap<usize, Vec<u8>>, file_seek_path: &Path) {
+            let buffer_length = buffer.length();
+
+            let mut buffer_data: Vec<u8> = Vec::with_capacity(buffer_length);
+
+            match buffer.source() {
+                gltf::buffer::Source::Uri(uri) => {
+
+                    let mut path_uri = PathBuf::from_str(uri).unwrap();
+                    if path_uri.is_relative() {
+                        path_uri = file_seek_path.join(path_uri);
+                    }
+
+                    let file = File::open(&path_uri);
+                    if let Err(_) = file {
+                        buffer_cache.insert(buffer.index(), Vec::with_capacity(buffer_length));
+                        return;
+                    }
+                    let mut file = file.unwrap();
+                    let bytes_read = file.read_to_end(&mut buffer_data).unwrap_or_else(|_| {
+                        println!("Failed to read referenced by GLTF file: {}", &path_uri.to_str().unwrap_or("NON-UTF-8 PATH NAME"));
+                        for _ in 0..buffer_length {
+                            buffer_data.push(0);
+                        }
+                        buffer_length
+                    });
+                    if bytes_read < buffer_length {
+                        println!("Read number of bytes is smaller than buffer length!");
+                    }
+
+                    buffer_cache.insert(buffer.index(), buffer_data);
+                },
+                gltf::buffer::Source::Bin => {
+                    return;
+                }
+            }
+        }
+
+        fn is_buffer_cached(buffer: &gltf::Buffer, buffer_cache: &HashMap<usize, Vec<u8>>) -> bool {
+            buffer_cache.contains_key(&buffer.index())
+        }
+
+        fn read_acessor(accessor: &gltf::Accessor<'_>, file_seek_path: &Path, binary_payload: &Option<Vec<u8>>, buffer_cache: &mut HashMap<usize, Vec<u8>>) -> Vec<u8> {
+            // Get accessor parameters
+            //let index = accessor.index();
+            //let size = accessor.size();
+
+            let accessor_offset = accessor.offset();
+            let count = accessor.count();
+
+            let component_type = accessor.data_type();
+            let element_type = accessor.dimensions();
+
+            // Sparse accessor
+            let sparse = accessor.sparse();
+            
+            // Get view buffer
+            let view_buffer = accessor.view();
+
+            match view_buffer {
+                Some(view) => {
+                    // Get buffer view parameters
+                    let offset = view.offset();
+                    let length = view.length();
+                    let stride = view.stride();
+                    let target = view.target();
+                    
+                    let buffer = view.buffer();
+                    let buffer_length: usize = buffer.length();
+                    if buffer_length < length {
+                        panic!("!!! buffer length is smaller than specified view length !!!")
+                    }
+
+                    let full_offset = offset+accessor_offset;
+
+                    let mut slice: &[u8];
+
+                    if !is_buffer_cached(&buffer, buffer_cache) {
+                        cache_buffer(&buffer, buffer_cache, file_seek_path);
+                    }
+
+                    let buffer_data = access_buffer(&view, accessor, buffer_cache, binary_payload);
+
+                    buffer_data
+                }
+                None => panic!("No view buffer in accessor...")
+            }
+        }
+
+        fn process_node(node: &gltf::Node, file_seek_path: &Path, binary_payload: &Option<Vec<u8>>, buffer_cache: &mut HashMap<usize, Vec<u8>>, device: &wgpu::Device, mesh_list: &mut Vec<Mesh>) {
+            let transform = node.transform();
+            // transform.matrix() [[f32;4];4] is available instead of decomposed
+            // translation, rotation, scale
+            let decomposed_transform = transform.decomposed();
+
+            let mut vertex_list = Vec::<Vertex>::new();
+            let mut index_list = Vec::<u32>::new();
+
+            // Node may not have a mesh.
+            match node.mesh() {
+                Some(m) => {
+                    let primitive_count = m.primitives().count();
+                    
+                    // Primitives are submodels.
+                    for primitive in m.primitives() {
+                        for attribute in primitive.attributes() {
+                            // Get accessor parameters
+                            let index = attribute.1.index();
+                            let size = attribute.1.size();
+
+                            let accessor_offset = attribute.1.offset();
+                            let count = attribute.1.count();
+
+                            let component_type = attribute.1.data_type();
+                            let element_type = attribute.1.dimensions();
+
+                            // Sparse accessor
+                            let sparse = attribute.1.sparse();
+                            
+                            // Get view buffer
+                            let view_buffer = attribute.1.view();
+                            match view_buffer {
+                                Some(view) => {
+                                    // Get buffer view parameters
+                                    let offset = view.offset();
+                                    let length = view.length();
+                                    let stride = view.stride();
+                                    let target = view.target();
+                                    
+                                    let mut accessor_data = read_acessor(&attribute.1, file_seek_path, binary_payload, buffer_cache);
+                                    let mut aligned_data = Vec::with_capacity(accessor_data.len());
+
+                                    let bytes_per_element: usize;
+                                    match component_type {
+                                        gltf::accessor::DataType::F32 | gltf::accessor::DataType::U32 => bytes_per_element = 4,
+                                        gltf::accessor::DataType::I16 | gltf::accessor::DataType::U16 => bytes_per_element = 2,
+                                        gltf::accessor::DataType::I8  | gltf::accessor::DataType::U8 => bytes_per_element = 1,
+                                    }
+                                    
+                                    match stride {
+                                        Some(stride) => {
+                                            //println!("Stride of {}", stride);
+                                            let mut byte_index: usize = 0;
+                                            while byte_index < accessor_data.len() {
+                                                for i in 0..bytes_per_element {
+                                                    aligned_data.push(accessor_data[byte_index + i])
+                                                }
+                                                byte_index += stride;
+                                            }
+                                        }
+                                        None => {
+                                            //println!("No stride");
+                                            aligned_data = accessor_data.to_vec()
+                                        }
+                                    }
+                                    //println!("Aligned data total elements: {}", aligned_data.len());
+                                
+                                    // Semantics
+                                    match attribute.0 {
+                                        gltf::Semantic::Positions => {
+                                            println!("Adding positions...");
+                                            match component_type {
+                                                // Positions are always floats
+                                                gltf::accessor::DataType::F32 => {
+                                                    let transmuted = u8vec_to_f32vec(aligned_data);
+                                                    //println!("Positions vector: {:?}", transmuted);
+                                                    if transmuted.len() < count * 3 {
+                                                        panic!("Not enough values in position view buffer!");
+                                                    }
+                                                   for i in 0..count {
+                                                        let x = transmuted[i * 3];
+                                                        let y = transmuted[i * 3 + 1];
+                                                        let z = transmuted[i * 3 + 2];
+                                                        let xyz = [x, y, z];
+
+                                                        if vertex_list.len() <= i {
+                                                            vertex_list.push(Vertex::zeroed());
+                                                        }
+                                                        vertex_list.get_mut(i).unwrap().pos = xyz;
+                                                   }
+                                                }
+                                                _ => panic!("GLTF position accessor is something other than f32. That's against GLTF 2.0 specification.")
+                                            }
+                                            
+                                        },
+                                        gltf::Semantic::Normals => {
+                                            println!("Adding normals...");
+                                            match component_type {
+                                                // Normals are always floats
+                                                gltf::accessor::DataType::F32 => {
+                                                    let transmuted = u8vec_to_f32vec(aligned_data);
+                                                    if transmuted.len() < count * 3 {
+                                                        panic!("Not enough values in position view buffer!");
+                                                    }
+                                                   for i in 0..count {
+                                                        let x = transmuted[i * 3];
+                                                        let y = transmuted[i * 3 + 1];
+                                                        let z = transmuted[i * 3 + 2];
+                                                        let xyz: [f32; 3] = [x, y, z];
+
+                                                        if vertex_list.len() < i {
+                                                            vertex_list.push(Vertex::zeroed());
+                                                        }
+                                                        vertex_list.get_mut(i).unwrap().normals = xyz;
+                                                   }
+                                                }
+                                                _ => panic!("GLTF normal accessor is something other than f32. That's against GLTF 2.0 specification.")
+                                            }
+                                        },
+                                        gltf::Semantic::TexCoords(_v) => {
+                                            println!("Adding texcoord...");
+                                            // It can be floats, unsigned byte normalized and unsigned short normalized
+                                            match component_type {
+                                                gltf::accessor::DataType::F32 => {
+                                                    let transmuted = u8vec_to_f32vec(aligned_data);
+                                                    if transmuted.len() < count * 2 {
+                                                        panic!("Not enough values in texcoord view buffer!")
+                                                    }
+                                                    for i in 0..count {
+                                                        let x = transmuted[i * 2];
+                                                        let y = transmuted[i * 2 + 1];
+                                                        let xy = [x, y];
+
+                                                        if vertex_list.len() < i {
+                                                            vertex_list.push(Vertex::zeroed());
+                                                        }
+                                                        vertex_list.get_mut(i).unwrap().tex_coord = xy;
+                                                    }
+                                                }
+                                                gltf::accessor::DataType::U16 => {
+                                                    let transmuted = u8vec_to_u16vec(aligned_data);
+                                                    if transmuted.len() < count * 2 {
+                                                        panic!("Not enough values in texcoord view buffer!")
+                                                    }
+                                                    for i in 0..count {
+                                                        let x = transmuted[i * 2];
+                                                        let y = transmuted[i * 2 + 1];
+                                                        let xy = [x as f32, y as f32];
+                                                        
+                                                        if vertex_list.len() < i {
+                                                            vertex_list.push(Vertex::zeroed());
+                                                        }
+                                                        vertex_list.get_mut(i).unwrap().tex_coord = xy;
+                                                    }
+                                                }
+                                                gltf::accessor::DataType::U8 => {
+                                                    // aligned_data is already u8.
+                                                    if aligned_data.len() < count * 2 {
+                                                        panic!("Not enough values in texcoord view buffer!")
+                                                    }
+                                                    for i in 0..count {
+                                                        let x = aligned_data[i * 2];
+                                                        let y = aligned_data[i * 2 + 1];
+                                                        let xy = [x as f32, y as f32];
+                                                        
+                                                        if vertex_list.len() < i {
+                                                            vertex_list.push(Vertex::zeroed());
+                                                        }
+                                                        vertex_list.get_mut(i).unwrap().tex_coord = xy;
+                                                    }
+                                                }
+                                                _ => panic!("GLTF texcoord accessor is something other than f32, u16 or u8. That's against GLTF 2.0 specification.")
+                                            }
+                                        },
+                                        gltf::Semantic::Weights(_v) => {
+                                            // Ignore
+                                            // TODO: read
+                                        },
+                                        gltf::Semantic::Joints(_v) => {
+                                            // Ignore
+                                            // TODO: read
+                                        },
+                                        // Vertex colors are not planned to be supported
+                                        gltf::Semantic::Colors(_) => (),
+                                        _ => (),
+                                    }
+                                }
+                                None => ()
+                            }
+
+                            let min = attribute.1.min();
+                            let max = attribute.1.max();
+                        }
+                        let bounding_box = primitive.bounding_box();
+                        let indices = primitive.indices();
+                        match indices {
+                            Some(accessor) => {
+                                let view = accessor.view();
+                                if let None = view {
+                                    panic!("FUCK!!!! No indices view!")
+                                }
+                                let view = view.unwrap();
+
+                                let buffer = view.buffer();
+
+                                if !is_buffer_cached(&buffer, buffer_cache) {
+                                    cache_buffer(&buffer, buffer_cache, file_seek_path);
+                                }
+
+                                let indices_data = read_acessor(&accessor, file_seek_path, binary_payload, buffer_cache);
+
+                                let component_type = accessor.data_type();
+
+                                let stride = view.stride();
+                                let bytes_per_element: usize;
+                                match component_type {
+                                    gltf::accessor::DataType::F32 | gltf::accessor::DataType::U32 => bytes_per_element = 4,
+                                    gltf::accessor::DataType::I16 | gltf::accessor::DataType::U16 => bytes_per_element = 2,
+                                    gltf::accessor::DataType::I8  | gltf::accessor::DataType::U8 => bytes_per_element = 1,
+                                }
+
+                                let mut aligned_data = Vec::with_capacity(indices_data.len());
+
+                                match stride {
+                                    Some(stride) => {
+                                        let mut byte_index: usize = 0;
+                                        while byte_index < indices_data.len() {
+                                            for i in 0..bytes_per_element {
+                                                aligned_data.push(indices_data[byte_index + i])
+                                            }
+                                            byte_index += stride;
+                                        }
+                                    }
+                                    None => aligned_data = indices_data.to_vec(),
+                                }
+
+                                match component_type {
+                                    gltf::accessor::DataType::U32  => {
+                                        let aligned_data = u8vec_to_u32vec(aligned_data);
+                                        for v in aligned_data {
+                                            index_list.push(v);
+                                        }
+                                    }
+                                    gltf::accessor::DataType::U16 | gltf::accessor::DataType::I16 => {
+                                        let aligned_data = u8vec_to_u16vec(aligned_data);
+                                        for v in aligned_data {
+                                            index_list.push(v.into());
+                                        }
+                                    }
+                                    gltf::accessor::DataType::U8 | gltf::accessor::DataType::I8 => {
+                                        for v in aligned_data {
+                                            index_list.push(v.into());
+                                        }
+                                    }
+                                    _ => ()
+                                }
+                            },
+                            None => {
+                                for i in 0..primitive.attributes().count() {
+                                    index_list.push(i as u32);
+                                }
+                            }
+                        }
+                    }
+
+                    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: bytemuck::cast_slice(&vertex_list),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents: bytemuck::cast_slice(&index_list),
+                        usage: wgpu::BufferUsages::INDEX
+                    });
+
+                    let mesh = Mesh::new(vertex_list, index_list, vertex_buffer, index_buffer, "default".to_string(), None);
+                    mesh_list.push(mesh);
+                },
+                None => (),
+            }
+
+            // Full tree processing
+            // Recursion
+            for child in node.children() {
+                process_node(&child, file_seek_path, binary_payload, buffer_cache, device, mesh_list);
+            }
+        }
+
+        let mut buffer_cache = HashMap::<usize, Vec<u8>>::new();
+
+        let device = &self.state.as_ref().expect("Can not create billboard before state is initialized").device;
+        let mut mesh_list = Vec::<Mesh>::new();
 
         // Scenes
         for scene in gltf.scenes() {
             // Nodes - i.e. meshes, cameras, lights, etc.
             for node in scene.nodes() {
-                // Node may not have a mesh.
-                match node.mesh() {
-                    Some(m) => {
-                        // Primitives are triangles, lines, etc.
-                        for primitive in m.primitives() {
-                            // Primitive Attributes contain many vertex attributes like positions, normals, UVs, etc.
-                            for attribute in primitive.attributes() {
-                                let index = attribute.1.index();
-                                let size = attribute.1.size();
-                                let view_buffer = attribute.1.view();
-                                let offset = attribute.1.offset();
-                                let count = attribute.1.count();
-
-                                let data_type = attribute.1.data_type();
-                                let dimensions = attribute.1.dimensions();
-
-                                match attribute.0 {
-                                    gltf::Semantic::Positions => {
-                                        
-                                        //verts.push(attribute.1);
-                                    },
-                                    gltf::Semantic::Normals => {
-
-                                    },
-                                    gltf::Semantic::TexCoords(v) => {
-
-                                    },
-                                    gltf::Semantic::Weights(v) => {
-
-                                    },
-                                    _ => {}
-                                }
-                            }
-                            let bounding_box = primitive.bounding_box();
-                            let indices = primitive.indices();
-                        }
-                    },
-                    None => (),
-                }
+                process_node(&node, file_seek_path, &binary_payload, &mut buffer_cache, device, &mut mesh_list);
             }
         }
 
-        let device = &self.state.as_ref().expect("Can not load model before state is initialized").device;
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: &[0; 1],
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
         // let buffer_layout = Vertex::layout();
 
-        Ok(Mesh::new(
-            verts,
-            Vec::new(),
-            vertex_buffer,
-            index_buffer,
-
-            "default".to_string(),
-            None
-        ))
+        Ok(mesh_list)
     }
 
     pub fn load_shader(&mut self, source: &str, label: String) {
@@ -547,6 +946,13 @@ impl ApplicationHandler for App {
             let texture = self.load_texture_from_image("example/test.png");
             let billboard = self.create_billboard([0.4, 0.4], Some(texture));
             self.resources.write().unwrap().add_mesh(billboard);
+
+            let mut model_meshes = self.load_model("res/test_model2.glb").unwrap();
+            let mut mesh = model_meshes.remove(0);
+            //println!("Mesh vertices: {:?}", mesh.vertices());
+            let texture = self.load_texture_from_image("example/test.png");
+            mesh.set_texture(texture);
+            self.resources.write().unwrap().add_mesh(mesh);
 
             self.initialized = true;
         }
