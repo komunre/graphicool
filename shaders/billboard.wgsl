@@ -1,4 +1,18 @@
-// Vertex stuff
+struct CameraUniform {
+    vp_mat: mat4x4<f32>
+}
+
+struct ModelUniform {
+    m_mat: mat4x4<f32>
+}
+
+// Camera
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+// Model transform
+@group(1) @binding(0)
+var<uniform> model_u: ModelUniform; 
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) tex_coords: vec2<f32>,
@@ -13,15 +27,15 @@ struct VertexOutput {
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = vec4<f32>(model.position, 1.0);
+    out.clip_position = camera.vp_mat * vec4<f32>(model.position, 1.0);
     out.uv = model.tex_coords;
     return out;
 }
 
 // Fragment stuff
-@group(0) @binding(0)
+@group(2) @binding(0)
 var t_diffuse: texture_2d<f32>;
-@group(0) @binding(1)
+@group(2) @binding(1)
 var s_diffuse: sampler;
 
 @fragment

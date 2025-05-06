@@ -1,6 +1,8 @@
 use std::{borrow::Cow, collections::HashMap, default, fs::File, io::{BufReader, Read}, mem::transmute, path::{Path, PathBuf}, rc::Rc, str::FromStr, sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}};
 
 use bytemuck::Zeroable;
+use cgmath::One;
+use engine::resources::{CameraView, Transform};
 use wgpu::{naga::proc::index, util::{align_to, DeviceExt}, RenderPass};
 use winit::{
     application::ApplicationHandler,
@@ -30,6 +32,10 @@ struct App<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider +
     resources: Arc<RwLock<GlobalResources>>,
     
     initialized: bool,
+
+    time_passed: f64,
+    time_delta: f64,
+    last_frame: std::time::Instant,
 }
 
 impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + ShaderProvider + GLTFModelProvider> App<T> {
@@ -63,6 +69,9 @@ impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + Shade
             resources: Arc::<RwLock::<GlobalResources>>::default(),
             resource_provider,
             initialized: false,
+            time_passed: 0.0,
+            time_delta: 0.0,
+            last_frame: std::time::Instant::now(),
         }
     }
 }
@@ -116,6 +125,23 @@ impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + Shade
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                // Time logic
+                let time_now = std::time::Instant::now();
+                self.time_delta = (time_now - self.last_frame).as_secs_f64();
+                self.time_passed += self.time_delta;
+                self.last_frame = time_now;
+
+                // Funny logic
+                let mut new_camera_view = CameraView::default();
+                new_camera_view.eye = cgmath::Point3::new((self.time_passed / 5.0).sin() as f32 * 0.6, 0.15, (self.time_passed / 5.0).cos() as f32 * 0.6);
+                state.set_camera_view(new_camera_view);
+                
+                let mut resources = self.resources.try_write();
+                if let Ok(mut resources) = resources {
+                    resources.meshes[1].set_transform(Transform::new([0.0, (self.time_passed).sin() as f32 * 0.2, 0.0], cgmath::Quaternion::new(0.0, 0.0, 0.0, 1.0).into(), [1.0, 1.0, 1.0]));
+                }
+
+                // Render
                 state.render(self.resources.clone());
 
                 // Emits new redraw request after finishing last one.

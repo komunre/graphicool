@@ -1,4 +1,9 @@
 use std::collections::HashMap;
+use bytemuck::{Pod, Zeroable};
+use cgmath::{One, SquareMatrix, Zero};
+use wgpu::util::DeviceExt;
+
+use crate::engine::OPENGL_TO_WGPU_MATRIX;
 
 pub struct GlobalResources {
     pub meshes: Vec<Mesh>,
@@ -34,7 +39,233 @@ impl Default for GlobalResources {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod)]
+pub struct Transform {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3]
+}
+
+impl Transform {
+    pub fn identity() -> Self {
+        Self {
+            translation: cgmath::Point3::<f32>::new(0.0, 0.0, 0.0).into(),
+            rotation: cgmath::Quaternion::<f32>::one().into(),
+            scale: cgmath::Vector3::<f32>::new(1.0, 1.0, 1.0).into()
+        }
+    }
+
+    pub fn new(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Self {
+        Self {
+            translation,
+            rotation,
+            scale
+        }
+    }
+
+    pub fn build_model_projection_matrix(&self) -> cgmath::Matrix4::<f32> {
+        let translation_mat = cgmath::Matrix4::from_translation(self.translation.into());
+        let scale_mat = cgmath::Matrix4::from_nonuniform_scale(self.scale[0], self.scale[1], self.scale[2]);
+        // OH GOD HELP ME QUATERNIONS
+        let rotation_mat = cgmath::Matrix4::new(
+            2.0 * (self.rotation[3] * self.rotation[3] + self.rotation[0] * self.rotation[0]) - 1.0,
+            2.0 * (self.rotation[0] * self.rotation[1] + self.rotation[3] * self.rotation[2]),
+            2.0 * (self.rotation[0] * self.rotation[2] - self.rotation[3] * self.rotation[1]),
+            0.0,
+
+            2.0 * (self.rotation[0] * self.rotation[2]),
+            2.0 * (self.rotation[3] * self.rotation[3] + self.rotation[1] * self.rotation[1]) - 1.0,
+            2.0 * (self.rotation[1] * self.rotation[2] + self.rotation[3] * self.rotation[0]),
+            0.0,
+
+            2.0 * (self.rotation[0] * self.rotation[2] + self.rotation[3] * self.rotation[1]),
+            2.0 * (self.rotation[1] * self.rotation[2] - self.rotation[3] * self.rotation[0]),
+            2.0 *  (self.rotation[3] * self.rotation[3] + self.rotation[2] * self.rotation[2]) - 1.0,
+            0.0,
+
+            0.0,
+            0.0,
+            0.0,
+            1.0
+        );
+
+        translation_mat * rotation_mat * scale_mat
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod)]
+pub struct TransformUniform {
+    pub model_proj: [[f32; 4]; 4]
+}
+
+impl TransformUniform {
+    pub fn new() -> Self {
+        Self {
+            model_proj: cgmath::Matrix4::identity().into()
+        }
+    }
+
+    pub fn update_model_projection(&mut self, transform: &Transform) {
+        self.model_proj = transform.build_model_projection_matrix().into();
+    }
+}
+
+pub struct TransformHandle {
+    buffer: wgpu::Buffer,
+}
+
+impl TransformHandle {
+    pub fn new(transform: &Transform, device: &wgpu::Device) -> Self {
+        let mut transform_uniform = TransformUniform::new();
+        transform_uniform.update_model_projection(transform);
+
+        let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera buffer"),
+            contents: bytemuck::cast_slice(&[transform_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
+        });
+
+        TransformHandle {
+            buffer: transform_buffer,
+        }   
+    }
+
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    pub fn update_handle(&self, transform: &Transform, queue: &wgpu::Queue) {
+        let mut transform_uniform = TransformUniform::new();
+        transform_uniform.update_model_projection(transform);
+
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[transform_uniform]));
+    }
+
+    pub fn binding_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None
+                    },
+                    count: None
+                },
+            ],
+            label: Some("transform_uniform_buffer_binding_layout")
+        })
+    }
+}
+
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod)]
+pub struct CameraUniform {
+    pub view_proj: [[f32; 4]; 4]
+}
+
+impl CameraUniform {
+    pub fn new() -> Self {
+        Self {
+            view_proj: cgmath::Matrix4::identity().into()
+        }
+    }
+
+    pub fn update_view_projection(&mut self, camera: &CameraView) {
+        self.view_proj = camera.build_view_projection_matrix().into();
+    }
+}
+
+pub struct CameraHandle {
+    buffer: wgpu::Buffer,
+}
+
+impl CameraHandle {
+    pub fn new(camera: &CameraView, device: &wgpu::Device) -> Self {
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update_view_projection(camera);
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
+        });
+
+        CameraHandle {
+            buffer: camera_buffer,
+        }
+    }
+
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    pub fn update_handle(&self, camera: &CameraView, queue: &wgpu::Queue) {
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update_view_projection(camera);
+
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
+    }
+
+    pub fn binding_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None
+                    },
+                    count: None
+                }
+            ],
+            label: Some("camera_uniform_buffer_binding_layout")
+        })
+    }
+}
+
+pub struct CameraView {
+    pub eye: cgmath::Point3<f32>,
+    pub target: cgmath::Point3<f32>,
+    pub up: cgmath::Vector3<f32>,
+    pub aspect: f32,
+    pub fovy: f32,
+    pub znear: f32,
+    pub zfar: f32,
+}
+
+impl Default for CameraView {
+    fn default() -> Self {
+        Self {
+            eye: cgmath::Point3::new(0.0, 0.0, 1.0),
+            target: cgmath::Point3::new(0.0, 0.0, 0.0),
+            up: cgmath::Vector3::new(0.0, 1.0, 0.0),
+            aspect: 16.0_f32 / 9.0_f32,
+            fovy: 60.0,
+            znear: 0.01,
+            zfar: 1000.0,
+        }
+    }
+}
+
+impl CameraView {
+    pub fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+
+        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
+
+        OPENGL_TO_WGPU_MATRIX * proj * view
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Zeroable, Pod)]
 pub struct Vertex {
     pub pos: [f32; 3],
     pub tex_coord: [f32; 2],
@@ -91,11 +322,11 @@ pub struct Mesh {
 
     shader_name: String,
     texture: Option<TextureHandle>,
-    //shader: Arc<wgpu::ShaderModule>,
+    transform: Transform,
 }
 
 impl Mesh {
-    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, vertex_buffer: wgpu::Buffer, index_buffer: wgpu::Buffer, shader_name: String, texture: Option<TextureHandle>) -> Self {
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, vertex_buffer: wgpu::Buffer, index_buffer: wgpu::Buffer, shader_name: String, texture: Option<TextureHandle>, transform: Transform) -> Self {
         Mesh {
             vertices,
             indices,
@@ -104,7 +335,8 @@ impl Mesh {
             index_buffer,
 
             shader_name,
-            texture
+            texture,
+            transform
         }
     }
 
@@ -132,8 +364,16 @@ impl Mesh {
         &self.texture
     }
 
+    pub fn transform(&self) -> &Transform {
+        &self.transform
+    }
+
     pub fn set_texture(&mut self, texture: TextureHandle) {
         self.texture = Some(texture);
+    }
+
+    pub fn set_transform(&mut self, transform: Transform) {
+        self.transform = transform;
     }
 }
 
@@ -142,12 +382,12 @@ pub struct TextureHandle {
     texture_view: wgpu::TextureView,
     texture_sampler: wgpu::Sampler,
 
-    bind_group: wgpu::BindGroup,
-    bind_layout: wgpu::BindGroupLayout,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_layout: Option<wgpu::BindGroupLayout>,
 }
 
 impl TextureHandle {
-    pub fn new(texture: wgpu::Texture, texture_view: wgpu::TextureView, texture_sampler: wgpu::Sampler, bind_group: wgpu::BindGroup, bind_layout: wgpu::BindGroupLayout) -> Self {
+    pub fn new(texture: wgpu::Texture, texture_view: wgpu::TextureView, texture_sampler: wgpu::Sampler, bind_group: Option<wgpu::BindGroup>, bind_layout: Option<wgpu::BindGroupLayout>) -> Self {
         TextureHandle {
             texture,
             texture_view,
@@ -160,13 +400,33 @@ impl TextureHandle {
 }
 
 impl TextureHandle {
-    pub fn bind_group(&self) -> &wgpu::BindGroup {
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn textuer_view(&self) -> &wgpu::TextureView {
+        &self.texture_view
+    }
+
+    pub fn texture_sampler(&self) -> &wgpu::Sampler {
+        &self.texture_sampler
+    }
+
+    pub fn bind_group(&self) -> &Option<wgpu::BindGroup> {
         &self.bind_group
     }
 
-    pub fn bind_layout(&self) -> &wgpu::BindGroupLayout {
+    pub fn bind_layout(&self) -> &Option<wgpu::BindGroupLayout> {
         &self.bind_layout
     }
+
+    /*pub fn write_to_texture(&self, offset: u64, data: &[u8], queue: wgpu::Queue) {
+        queue.write_texture(wgpu::TexelCopyTextureInfo {
+
+        },
+        data,
+        wgpu::TexelCopyBufferLayout { offset: (), bytes_per_row: (), rows_per_image: () })
+    }*/
 }
 
 
@@ -196,31 +456,31 @@ pub mod provider {
     // So Arc<wgpu::Device> is, instead, &wgpu::Device
 
     pub trait BillboardProvider {
-        fn create_billboard(&mut self, dimensions: Vector2<f32>, texture: Option<TextureHandle>, device: &wgpu::Device) -> Mesh;
+        fn create_billboard(&self, dimensions: Vector2<f32>, texture: Option<TextureHandle>, device: &wgpu::Device) -> Mesh;
     }
     
     pub trait Texture2DProvider {
-        fn create_texture_2d(&mut self, dimensions: (u32, u32), usage: wgpu::TextureUsages, tex_dimension: wgpu::TextureDimension, tex_format: wgpu::TextureFormat, device: &wgpu::Device) -> (wgpu::Texture, wgpu::Extent3d);
+        fn create_texture_2d(&self, dimensions: (u32, u32), usage: wgpu::TextureUsages, tex_dimension: wgpu::TextureDimension, tex_format: wgpu::TextureFormat, device: &wgpu::Device) -> (wgpu::Texture, wgpu::Extent3d);
     }
 
     pub trait DepthBufferProvider {
-        fn create_depth_buffer(&mut self, dimensions: (u32, u32), device: &wgpu::Device) -> (wgpu::Texture, wgpu::Sampler, wgpu::Extent3d);
+        fn create_depth_buffer(&self, dimensions: (u32, u32), device: &wgpu::Device) -> (TextureHandle, wgpu::Extent3d);
     }
 
     pub trait TextureFromImageProvider {
-        fn load_texture_from_image(&mut self, path: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> TextureHandle;
+        fn load_texture_from_image(&self, path: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> TextureHandle;
     }
 
     pub trait GLTFModelProvider {
-        fn load_model(&mut self, path: &str, device: &wgpu::Device) -> Result<Vec<Mesh>, gltf::Error>;
+        fn load_model(&self, path: &str, device: &wgpu::Device) -> Result<Vec<Mesh>, gltf::Error>;
     }
 
     pub trait ShaderProvider {
-        fn load_shader_into_resources(&mut self, source: &str, label: String, device: &wgpu::Device, resources: Arc<RwLock<GlobalResources>>);
+        fn load_shader_into_resources(&self, source: &str, label: String, device: &wgpu::Device, resources: Arc<RwLock<GlobalResources>>);
     }
 
     impl ShaderProvider for DefaultResourceProvider {
-        fn load_shader_into_resources(&mut self, source: &str, label: String, device: &wgpu::Device, resources: Arc<RwLock<GlobalResources>>) {
+        fn load_shader_into_resources(&self, source: &str, label: String, device: &wgpu::Device, resources: Arc<RwLock<GlobalResources>>) {
             let mut file = File::open(source).unwrap();
             let mut data: Vec<u8> = Vec::new();
             file.read_to_end(&mut data).unwrap();
@@ -241,7 +501,7 @@ pub mod provider {
     }
 
     impl Texture2DProvider for DefaultResourceProvider {
-        fn create_texture_2d(&mut self, dimensions: (u32, u32), usage: wgpu::TextureUsages, tex_dimension: wgpu::TextureDimension, tex_format: wgpu::TextureFormat, device: &wgpu::Device) -> (wgpu::Texture, wgpu::Extent3d) {
+        fn create_texture_2d(&self, dimensions: (u32, u32), usage: wgpu::TextureUsages, tex_dimension: wgpu::TextureDimension, tex_format: wgpu::TextureFormat, device: &wgpu::Device) -> (wgpu::Texture, wgpu::Extent3d) {
             let texture_size = wgpu::Extent3d {
                 width: dimensions.0,
                 height: dimensions.1,
@@ -275,7 +535,7 @@ pub mod provider {
     }
 
     impl TextureFromImageProvider for DefaultResourceProvider {
-        fn load_texture_from_image(&mut self, path: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> TextureHandle {
+        fn load_texture_from_image(&self, path: &str, device: &wgpu::Device, queue: &wgpu::Queue) -> TextureHandle {
             let mut file = File::open(path).unwrap();
             let mut texture_bytes: Vec<u8> = Vec::new();
             file.read_to_end(&mut texture_bytes);
@@ -355,14 +615,14 @@ pub mod provider {
                 texture.0,
                 texture_view,
                 texture_sampler,
-                texture_bind_group,
-                texture_bind_layout,
+                Some(texture_bind_group),
+                Some(texture_bind_layout),
             )
         }
     }
 
     impl BillboardProvider for DefaultResourceProvider {
-        fn create_billboard(&mut self, dimensions: Vector2<f32>, texture: Option<TextureHandle>, device: &wgpu::Device) -> Mesh {
+        fn create_billboard(&self, dimensions: Vector2<f32>, texture: Option<TextureHandle>, device: &wgpu::Device) -> Mesh {
             let verts = vec![
                 Vertex::new(
                     [0.0, 0.0, 0.0],
@@ -415,12 +675,13 @@ pub mod provider {
                 index_buffer,
                 "billboard".to_string(),
                 texture,
+                super::Transform::identity(),
             )
         }
     }
 
     impl DepthBufferProvider for DefaultResourceProvider {
-        fn create_depth_buffer(&mut self, dimensions: (u32, u32), device: &wgpu::Device) -> (wgpu::Texture, wgpu::Sampler, wgpu::Extent3d) {
+        fn create_depth_buffer(&self, dimensions: (u32, u32), device: &wgpu::Device) -> (TextureHandle, wgpu::Extent3d) {
             let texture = self.create_texture_2d(dimensions, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, wgpu::TextureDimension::D2, wgpu::TextureFormat::Depth32Float, device);
 
             let view = texture.0.create_view(&wgpu::TextureViewDescriptor::default());
@@ -430,16 +691,27 @@ pub mod provider {
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
                 mipmap_filter: wgpu::FilterMode::Linear,
+                compare: Some(wgpu::CompareFunction::LessEqual),
+                lod_min_clamp: 0.0,
+                lod_max_clamp: 100.0,
                 ..Default::default()
             });
 
-            (texture.0, sampler, texture.1)
+            
+
+            (TextureHandle {
+                texture: texture.0,
+                texture_view: view,
+                texture_sampler: sampler,
+                bind_group: None,
+                bind_layout: None
+            }, texture.1)
         }
     }
 
     impl GLTFModelProvider for DefaultResourceProvider {
         // GLTF is hard.
-        fn load_model(&mut self, path: &str, device: &wgpu::Device) -> Result<Vec<Mesh>, gltf::Error> {
+        fn load_model(&self, path: &str, device: &wgpu::Device) -> Result<Vec<Mesh>, gltf::Error> {
             println!("Loading GLTF model by path of {}", path);
 
             let gltf_path = Path::new(path);
@@ -848,7 +1120,7 @@ pub mod provider {
                             usage: wgpu::BufferUsages::INDEX
                         });
 
-                        let mesh = Mesh::new(vertex_list, index_list, vertex_buffer, index_buffer, "default".to_string(), None);
+                        let mesh = Mesh::new(vertex_list, index_list, vertex_buffer, index_buffer, "default".to_string(), None, super::Transform::identity());
                         mesh_list.push(mesh);
                     },
                     None => (),

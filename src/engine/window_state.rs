@@ -1,6 +1,9 @@
 use std::sync::{Arc, RwLock};
+use wgpu::{Operations, RenderPassDepthStencilAttachment};
 use winit::window::Window;
-use crate::engine::resources::{GlobalResources, Mesh, Vertex};
+use crate::engine::resources::{GlobalResources, Mesh, TransformHandle, Transform, Vertex};
+
+use super::resources::{provider::{DefaultResourceProvider, DepthBufferProvider}, CameraHandle, CameraView, TextureHandle};
 
 pub struct WindowState {
     instance: Arc<wgpu::Instance>,
@@ -12,6 +15,11 @@ pub struct WindowState {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
+
+    depth_buffer: TextureHandle,
+    camera_view: CameraView,
+    camera_handle: CameraHandle,
+    camera_bind_group: wgpu::BindGroup
 }
 
 impl WindowState {
@@ -22,6 +30,23 @@ impl WindowState {
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
+        // TODO: Replace with generic
+        let depth_buffer = DefaultResourceProvider{}.create_depth_buffer((size.width, size.height), &device).0; // PLACEHOLDER!
+
+        let mut default_camera_view = CameraView::default();
+        default_camera_view.aspect = size.width as f32 / size.height as f32;
+        //default_camera_view.eye = cgmath::Point3::<f32>::new(3.0, 3.0, 2.0);
+        let camera_handle = CameraHandle::new(&default_camera_view, &device);
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera_bind_group"),
+            layout: &CameraHandle::binding_layout(&device),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_handle.buffer().as_entire_binding()
+            }]
+        });
+
         let state = Self {
             instance,
             adapter,
@@ -31,6 +56,11 @@ impl WindowState {
             size,
             surface,
             surface_format,
+
+            depth_buffer,
+            camera_view: default_camera_view,
+            camera_handle,
+            camera_bind_group,
         };
         
         state.configure_surface();
@@ -72,6 +102,18 @@ impl WindowState {
         self.size = new_size;
         
         self.configure_surface();
+
+        // TODO: Replace with generic (if needed)
+        self.set_depth_buffer(&DefaultResourceProvider{});
+    }
+
+    pub fn set_depth_buffer<T: DepthBufferProvider>(&mut self, provider: &T) {
+        self.depth_buffer = provider.create_depth_buffer((self.size.width, self.size.height), &self.device).0
+    }
+
+    pub fn set_camera_view(&mut self, camera_view: CameraView) {
+        self.camera_view = camera_view;
+        self.camera_handle.update_handle(&self.camera_view, &self.queue);
     }
 
     pub fn render(&mut self, resources: Arc<RwLock<GlobalResources>>) {
@@ -92,7 +134,7 @@ impl WindowState {
         // Create command encoder for our render pass
         let mut encoder = self.device.create_command_encoder(&Default::default());
         // Create render pass that will clear the screen
-        let mut renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &texture_view, // Set render pass view to the texture view we just created
@@ -102,21 +144,31 @@ impl WindowState {
                     store: wgpu::StoreOp::Store,
                 }
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: self.depth_buffer.textuer_view(),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+
+        // Camera view projection matrix bind
+        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
         // Draw calls here
         let resource_read =  resources.read().unwrap();
         for mesh in resource_read.meshes() {
             let name = mesh.shader_name();
             let shader: &wgpu::ShaderModule = resource_read.shaders().get(name).unwrap();
-            self.render_mesh(shader, &mut renderpass, mesh);
+            self.render_mesh(shader, &mut render_pass, mesh);
         }
         //}
         // End the renderpass
-        drop(renderpass);
+        drop(render_pass);
 
         // Submit the command in the queue to execute
         self.queue.submit([encoder.finish()]); // Submits the commands
@@ -125,17 +177,26 @@ impl WindowState {
     }
 
     fn render_mesh(&mut self, shader: &wgpu::ShaderModule, render_pass: &mut wgpu::RenderPass, mesh: &Mesh) {
-        let pipeline_layout = match mesh.texture() {
-            Some(texture) => self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+
+        fn default_bind_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[texture.bind_layout()],
-                push_constant_ranges: &[]
-            }),
-            None => self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&CameraHandle::binding_layout(device), &TransformHandle::binding_layout(device)],
                 push_constant_ranges: &[]
             })
+        }
+        
+        let pipeline_layout = match mesh.texture() {
+            Some(texture) => match texture.bind_layout() 
+            { 
+                Some(layout) => self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&CameraHandle::binding_layout(&self.device), &TransformHandle::binding_layout(&self.device), layout],
+                    push_constant_ranges: &[]
+                }), 
+                None => default_bind_layout(&self.device)
+            }
+            None => default_bind_layout(&self.device)
         };
 
         let swapchain_capabilities = self.surface.get_capabilities(&self.adapter);
@@ -167,7 +228,13 @@ impl WindowState {
                 polygon_mode: wgpu::PolygonMode::Fill, // PolygonMode::Fill means rasterization
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float, // TODO: replace with actual texture format from texture,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default()
+            }),
             multisample: wgpu::MultisampleState::default(), // Texture multisample (MSAA)
             multiview: None,
             cache: None,
@@ -179,10 +246,25 @@ impl WindowState {
         // Vertices and indices
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer().slice(..));
         render_pass.set_index_buffer(mesh.index_buffer().slice(..), wgpu::IndexFormat::Uint32);
+
+        // Model matrix bind
+        let transform_handle = TransformHandle::new(mesh.transform(), &self.device);
+
+        let transform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("transform_bind_group"),
+            layout: &TransformHandle::binding_layout(&self.device),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: transform_handle.buffer().as_entire_binding()
+            }]
+        });
+
+        render_pass.set_bind_group(1, Some(&transform_bind_group), &[]);
+        
         // Texture binds
         match mesh.texture() {
             Some(texture) => {
-                render_pass.set_bind_group(0, texture.bind_group(), &[]);
+                render_pass.set_bind_group(2, texture.bind_group(), &[]);
             }
             None => ()
         }
