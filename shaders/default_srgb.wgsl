@@ -63,6 +63,6 @@ var s_diffuse: sampler;
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let hdr = textureSample(t_diffuse, s_diffuse, in.uv);
-    let sdr = aces_tone_map(hdr.rgb)
+    let sdr = aces_tone_map(hdr.rgb);
     return hdr;
 }
