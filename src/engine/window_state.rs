@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 use wgpu::{Operations, RenderPassDepthStencilAttachment};
 use winit::window::Window;
-use crate::engine::resources::{GlobalResources, Mesh, TransformHandle, Transform, Vertex};
+use crate::engine::{is_texture_hdr, resources::{GlobalResources, Mesh, Transform, TransformHandle, Vertex}};
 
 use super::resources::{provider::{DefaultResourceProvider, DepthBufferProvider}, CameraHandle, CameraView, TextureHandle};
 
@@ -19,7 +19,9 @@ pub struct WindowState {
     depth_buffer: TextureHandle,
     camera_view: CameraView,
     camera_handle: CameraHandle,
-    camera_bind_group: wgpu::BindGroup
+    camera_bind_group: wgpu::BindGroup,
+
+    is_hdr: bool,
 }
 
 impl WindowState {
@@ -28,7 +30,14 @@ impl WindowState {
 
         let surface = instance.create_surface(window.clone()).unwrap();
         let cap = surface.get_capabilities(&adapter);
-        let surface_format = cap.formats[0];
+        let surface_format = match cap.formats.iter().find(|f| { return **f == wgpu::TextureFormat::Rgba32Float }) {
+            Some(f) => *f,
+            None => match cap.formats.iter().find(|f2| { return **f2 == wgpu::TextureFormat::Rgba16Float }) {
+                Some(f2) => *f2,
+                None => cap.formats[0]
+            }
+        };
+        println!("Selected {:?} surface format for {} window", surface_format, "unspecified");
 
         // TODO: Replace with generic
         let depth_buffer = DefaultResourceProvider{}.create_depth_buffer((size.width, size.height), &device).0; // PLACEHOLDER!
@@ -61,6 +70,8 @@ impl WindowState {
             camera_view: default_camera_view,
             camera_handle,
             camera_bind_group,
+
+            is_hdr: is_texture_hdr(surface_format),
         };
         
         state.configure_surface();
@@ -200,7 +211,16 @@ impl WindowState {
         };
 
         let swapchain_capabilities = self.surface.get_capabilities(&self.adapter);
-        let swapchain_format = swapchain_capabilities.formats[0];
+        let swapchain_format = match swapchain_capabilities.formats.iter().find(|f| { return **f == wgpu::TextureFormat::Rgba32Float }) {
+            Some(f) => *f,
+            None => match swapchain_capabilities.formats.iter().find(|f2| { return **f2 == wgpu::TextureFormat::Rgba16Float }) {
+                Some(f2) => *f2,
+                None => swapchain_capabilities.formats[0]
+            }
+        };
+        if swapchain_format != self.surface_format {
+            panic!("Swapchain and surface format mismatch!");
+        }
 
         let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,

@@ -93,15 +93,16 @@ impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + Shade
             self.resource_provider.load_shader_into_resources("shaders/triangle.wgsl", "triangle".to_string(), &self.device, self.resources.clone());
             self.resource_provider.load_shader_into_resources("shaders/default.wgsl", "default".to_string(), &self.device, self.resources.clone());
             self.resource_provider.load_shader_into_resources("shaders/billboard.wgsl", "billboard".to_string(), &self.device, self.resources.clone());
+            self.resource_provider.load_shader_into_resources("shaders/default_srgb.wgsl", "default_srgb".to_string(), &self.device, self.resources.clone());
+            self.resource_provider.load_shader_into_resources("shaders/billboard_srgb.wgsl", "billboard_srgb".to_string(), &self.device, self.resources.clone());
 
             let texture = self.resource_provider.load_texture_from_image("example/test.png", &self.device, &self.queue);
-            let billboard = self.resource_provider.create_billboard([0.4, 0.4], Some(texture), &self.device);
+            let billboard = self.resource_provider.create_billboard([0.4, 0.4], Some(texture.clone()), &self.device);
             self.resources.write().unwrap().add_mesh(billboard);
 
             let mut model_meshes = self.resource_provider.load_model("res/cube_test.glb", &self.device).unwrap();
             let mut mesh = model_meshes.remove(0);
             //println!("Mesh vertices: {:?}", mesh.vertices());
-            let texture = self.resource_provider.load_texture_from_image("example/test.png", &self.device, &self.queue);
             mesh.set_texture(texture);
             self.resources.write().unwrap().add_mesh(mesh);
 

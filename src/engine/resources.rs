@@ -5,6 +5,8 @@ use wgpu::util::DeviceExt;
 
 use crate::engine::OPENGL_TO_WGPU_MATRIX;
 
+#[repr(C)]
+#[derive(Debug)]
 pub struct GlobalResources {
     pub meshes: Vec<Mesh>,
 
@@ -111,6 +113,7 @@ impl TransformUniform {
     }
 }
 
+#[derive(Debug)]
 pub struct TransformHandle {
     buffer: wgpu::Buffer,
 }
@@ -180,6 +183,7 @@ impl CameraUniform {
     }
 }
 
+#[derive(Debug)]
 pub struct CameraHandle {
     buffer: wgpu::Buffer,
 }
@@ -230,6 +234,8 @@ impl CameraHandle {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct CameraView {
     pub eye: cgmath::Point3<f32>,
     pub target: cgmath::Point3<f32>,
@@ -313,6 +319,7 @@ impl Vertex {
     }
 }
 
+#[derive(Debug)]
 pub struct Mesh {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
@@ -377,6 +384,7 @@ impl Mesh {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TextureHandle {
     texture: wgpu::Texture,
     texture_view: wgpu::TextureView,
