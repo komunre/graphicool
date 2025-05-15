@@ -174,7 +174,10 @@ impl WindowState {
         let resource_read =  resources.read().unwrap();
         for mesh in resource_read.meshes() {
             let name = mesh.shader_name();
-            let shader: &wgpu::ShaderModule = resource_read.shaders().get(name).unwrap();
+            let shader: &wgpu::ShaderModule = match resource_read.shaders().get(name) {
+                Some(shader) => shader,
+                None => resource_read.shaders().get("default").expect("Fallback shader expected")
+            };
             self.render_mesh(shader, &mut render_pass, mesh);
         }
         //}

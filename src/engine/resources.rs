@@ -382,6 +382,10 @@ impl Mesh {
     pub fn set_transform(&mut self, transform: Transform) {
         self.transform = transform;
     }
+
+    pub fn set_shader_name(&mut self, shader: String) {
+        self.shader_name = shader;
+    }
 }
 
 #[derive(Debug, Clone)]
