@@ -1,23 +1,18 @@
-use std::{borrow::Cow, collections::HashMap, default, fs::File, io::{BufReader, Read}, mem::transmute, path::{Path, PathBuf}, rc::Rc, str::FromStr, sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}};
+use std::sync::{Arc, RwLock};
 
-use bytemuck::Zeroable;
-use cgmath::One;
 use engine::resources::{CameraView, Transform};
-use wgpu::{naga::proc::index, util::{align_to, DeviceExt}, RenderPass};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop},
     window::{Window, WindowId}
 };
-use vecmath::*;
 
 pub mod engine;
 pub mod math;
 
-use crate::engine::resources::{GlobalResources, Mesh, Vertex, TextureHandle, provider::*};
+use crate::engine::resources::{GlobalResources, provider::*};
 use crate::engine::window_state::WindowState;
-use crate::math::convert::*;
 
 
 pub struct GraphicalApplication<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + ShaderProvider + GLTFModelProvider> {
@@ -79,8 +74,8 @@ impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + Shade
 
 impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + ShaderProvider + GLTFModelProvider> ApplicationHandler for GraphicalApplication<T> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let mut window_attributes = Window::default_attributes();
-        //window_attributes.transparent = true;
+        let window_attributes = Window::default_attributes();
+
         let window = Arc::new(
             event_loop
                 .create_window(window_attributes)
@@ -138,7 +133,7 @@ impl<T: Texture2DProvider + TextureFromImageProvider + BillboardProvider + Shade
                 new_camera_view.eye = cgmath::Point3::new((self.time_passed / 5.0).sin() as f32 * 0.6, 0.15, (self.time_passed / 5.0).cos() as f32 * 0.6);
                 state.set_camera_view(new_camera_view);
                 
-                let mut resources = self.resources.try_write();
+                let resources = self.resources.try_write();
                 if let Ok(mut resources) = resources {
                     resources.meshes[1].set_transform(Transform::new([0.0, (self.time_passed).sin() as f32 * 0.2, 0.0], cgmath::Quaternion::new(0.0, 0.0, 0.0, 1.0).into(), [1.0, 1.0, 1.0]));
                 }
