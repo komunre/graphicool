@@ -1,16 +1,22 @@
+use crate::engine::{
+    is_texture_hdr,
+    resources::{GlobalResources, Mesh, Transform, TransformHandle, Vertex},
+};
 use std::sync::{Arc, RwLock};
 use wgpu::{Operations, RenderPassDepthStencilAttachment};
 use winit::window::Window;
-use crate::engine::{is_texture_hdr, resources::{GlobalResources, Mesh, Transform, TransformHandle, Vertex}};
 
-use super::resources::{provider::{DefaultResourceProvider, DepthBufferProvider}, CameraHandle, CameraView, TextureHandle};
+use super::resources::{
+    provider::{DefaultResourceProvider, DepthBufferProvider},
+    CameraHandle, CameraView, TextureHandle,
+};
 
 pub struct WindowState {
     instance: Arc<wgpu::Instance>,
     adapter: Arc<wgpu::Adapter>,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    
+
     window: Arc<Window>,
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
@@ -25,22 +31,41 @@ pub struct WindowState {
 }
 
 impl WindowState {
-    pub fn new(window: Arc<Window>, instance: Arc<wgpu::Instance>, adapter: Arc<wgpu::Adapter>, device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+    pub fn new(
+        window: Arc<Window>,
+        instance: Arc<wgpu::Instance>,
+        adapter: Arc<wgpu::Adapter>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+    ) -> Self {
         let size = window.inner_size();
 
         let surface = instance.create_surface(window.clone()).unwrap();
         let cap = surface.get_capabilities(&adapter);
-        let surface_format = match cap.formats.iter().find(|f| { return **f == wgpu::TextureFormat::Rgba32Float }) {
+        let surface_format = match cap
+            .formats
+            .iter()
+            .find(|f| return **f == wgpu::TextureFormat::Rgba32Float)
+        {
             Some(f) => *f,
-            None => match cap.formats.iter().find(|f2| { return **f2 == wgpu::TextureFormat::Rgba16Float }) {
+            None => match cap
+                .formats
+                .iter()
+                .find(|f2| return **f2 == wgpu::TextureFormat::Rgba16Float)
+            {
                 Some(f2) => *f2,
-                None => cap.formats[0]
-            }
+                None => cap.formats[0],
+            },
         };
-        println!("Selected {:?} surface format for {} window", surface_format, "unspecified");
+        println!(
+            "Selected {:?} surface format for {} window",
+            surface_format, "unspecified"
+        );
 
         // TODO: Replace with generic
-        let depth_buffer = DefaultResourceProvider{}.create_depth_buffer((size.width, size.height), &device).0; // PLACEHOLDER!
+        let depth_buffer = DefaultResourceProvider {}
+            .create_depth_buffer((size.width, size.height), &device)
+            .0; // PLACEHOLDER!
 
         let mut default_camera_view = CameraView::default();
         default_camera_view.aspect = size.width as f32 / size.height as f32;
@@ -52,8 +77,8 @@ impl WindowState {
             layout: &CameraHandle::binding_layout(&device),
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: camera_handle.buffer().as_entire_binding()
-            }]
+                resource: camera_handle.buffer().as_entire_binding(),
+            }],
         });
 
         let state = Self {
@@ -73,7 +98,7 @@ impl WindowState {
 
             is_hdr: is_texture_hdr(surface_format),
         };
-        
+
         state.configure_surface();
 
         state
@@ -102,7 +127,7 @@ impl WindowState {
         // Should be used to set resolution!
         // Can be used to set Vsync / NoVsync Mode!!!
         // Also can be used for changing view formats and alpha modes.
-        self.surface.configure(&self.device, &surface_config); 
+        self.surface.configure(&self.device, &surface_config);
     }
 
     pub fn get_window(&self) -> &Window {
@@ -111,20 +136,23 @@ impl WindowState {
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.size = new_size;
-        
+
         self.configure_surface();
 
         // TODO: Replace with generic (if needed)
-        self.set_depth_buffer(&DefaultResourceProvider{});
+        self.set_depth_buffer(&DefaultResourceProvider {});
     }
 
     pub fn set_depth_buffer<T: DepthBufferProvider>(&mut self, provider: &T) {
-        self.depth_buffer = provider.create_depth_buffer((self.size.width, self.size.height), &self.device).0
+        self.depth_buffer = provider
+            .create_depth_buffer((self.size.width, self.size.height), &self.device)
+            .0
     }
 
     pub fn set_camera_view(&mut self, camera_view: CameraView) {
         self.camera_view = camera_view;
-        self.camera_handle.update_handle(&self.camera_view, &self.queue);
+        self.camera_handle
+            .update_handle(&self.camera_view, &self.queue);
     }
 
     pub fn render(&mut self, resources: Arc<RwLock<GlobalResources>>) {
@@ -151,9 +179,14 @@ impl WindowState {
                 view: &texture_view, // Set render pass view to the texture view we just created
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.6, g: 0.2, b: 1.0, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.6,
+                        g: 0.2,
+                        b: 1.0,
+                        a: 1.0,
+                    }),
                     store: wgpu::StoreOp::Store,
-                }
+                },
             })],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                 view: self.depth_buffer.textuer_view(),
@@ -161,7 +194,7 @@ impl WindowState {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
-                stencil_ops: None
+                stencil_ops: None,
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
@@ -171,12 +204,15 @@ impl WindowState {
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
         // Draw calls here
-        let resource_read =  resources.read().unwrap();
+        let resource_read = resources.read().unwrap();
         for mesh in resource_read.meshes() {
             let name = mesh.shader_name();
             let shader: &wgpu::ShaderModule = match resource_read.shaders().get(name) {
                 Some(shader) => shader,
-                None => resource_read.shaders().get("default").expect("Fallback shader expected")
+                None => resource_read
+                    .shaders()
+                    .get("default")
+                    .expect("Fallback shader expected"),
             };
             self.render_mesh(shader, &mut render_pass, mesh);
         }
@@ -190,78 +226,99 @@ impl WindowState {
         surface_texture.present(); // Puts texture on screen
     }
 
-    fn render_mesh(&mut self, shader: &wgpu::ShaderModule, render_pass: &mut wgpu::RenderPass, mesh: &Mesh) {
-
+    fn render_mesh(
+        &mut self,
+        shader: &wgpu::ShaderModule,
+        render_pass: &mut wgpu::RenderPass,
+        mesh: &Mesh,
+    ) {
         fn default_bind_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&CameraHandle::binding_layout(device), &TransformHandle::binding_layout(device)],
-                push_constant_ranges: &[]
+                bind_group_layouts: &[
+                    &CameraHandle::binding_layout(device),
+                    &TransformHandle::binding_layout(device),
+                ],
+                push_constant_ranges: &[],
             })
         }
-        
+
         let pipeline_layout = match mesh.texture() {
-            Some(texture) => match texture.bind_layout() 
-            { 
-                Some(layout) => self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None,
-                    bind_group_layouts: &[&CameraHandle::binding_layout(&self.device), &TransformHandle::binding_layout(&self.device), layout],
-                    push_constant_ranges: &[]
-                }), 
-                None => default_bind_layout(&self.device)
-            }
-            None => default_bind_layout(&self.device)
+            Some(texture) => match texture.bind_layout() {
+                Some(layout) => {
+                    self.device
+                        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                            label: None,
+                            bind_group_layouts: &[
+                                &CameraHandle::binding_layout(&self.device),
+                                &TransformHandle::binding_layout(&self.device),
+                                layout,
+                            ],
+                            push_constant_ranges: &[],
+                        })
+                }
+                None => default_bind_layout(&self.device),
+            },
+            None => default_bind_layout(&self.device),
         };
 
         let swapchain_capabilities = self.surface.get_capabilities(&self.adapter);
-        let swapchain_format = match swapchain_capabilities.formats.iter().find(|f| { return **f == wgpu::TextureFormat::Rgba32Float }) {
+        let swapchain_format = match swapchain_capabilities
+            .formats
+            .iter()
+            .find(|f| return **f == wgpu::TextureFormat::Rgba32Float)
+        {
             Some(f) => *f,
-            None => match swapchain_capabilities.formats.iter().find(|f2| { return **f2 == wgpu::TextureFormat::Rgba16Float }) {
+            None => match swapchain_capabilities
+                .formats
+                .iter()
+                .find(|f2| return **f2 == wgpu::TextureFormat::Rgba16Float)
+            {
                 Some(f2) => *f2,
-                None => swapchain_capabilities.formats[0]
-            }
+                None => swapchain_capabilities.formats[0],
+            },
         };
         if swapchain_format != self.surface_format {
             panic!("Swapchain and surface format mismatch!");
         }
 
-        let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState { 
-                module: shader,
-                entry_point: Some("vs_main"),
-                buffers: &[
-                    Vertex::layout()
-                ],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(swapchain_format.into())]
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None, // TODO: A toggle between u16 and u32 // u32 indices list for extended indice count maximum (more memory usage)
-                front_face: wgpu::FrontFace::Ccw, // Counter-clockwise front
-                cull_mode: Some(wgpu::Face::Back), // Some(wgpu::Face::Back), // Cull back --- None // Cull nothing
-                unclipped_depth: false, // When set to false clips depth to 0-1. Unclipped depth requires `Features::DEPTH_CLIP_CONTROL` to be enabled
-                polygon_mode: wgpu::PolygonMode::Fill, // PolygonMode::Fill means rasterization
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float, // TODO: replace with actual texture format from texture,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default()
-            }),
-            multisample: wgpu::MultisampleState::default(), // Texture multisample (MSAA)
-            multiview: None,
-            cache: None,
-        });
+        let render_pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Vertex::layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(swapchain_format.into())],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList, // wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None, // TODO: A toggle between u16 and u32 // u32 indices list for extended indice count maximum (more memory usage)
+                    front_face: wgpu::FrontFace::Ccw, // Counter-clockwise front
+                    cull_mode: Some(wgpu::Face::Back), // Some(wgpu::Face::Back), // Cull back --- None // Cull nothing
+                    unclipped_depth: false, // When set to false clips depth to 0-1. Unclipped depth requires `Features::DEPTH_CLIP_CONTROL` to be enabled
+                    polygon_mode: wgpu::PolygonMode::Fill, // PolygonMode::Fill means rasterization
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float, // TODO: replace with actual texture format from texture,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(), // Texture multisample (MSAA)
+                multiview: None,
+                cache: None,
+            });
 
         render_pass.set_pipeline(&render_pipeline);
 
@@ -278,20 +335,20 @@ impl WindowState {
             layout: &TransformHandle::binding_layout(&self.device),
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: transform_handle.buffer().as_entire_binding()
-            }]
+                resource: transform_handle.buffer().as_entire_binding(),
+            }],
         });
 
         render_pass.set_bind_group(1, Some(&transform_bind_group), &[]);
-        
+
         // Texture binds
         match mesh.texture() {
             Some(texture) => {
                 render_pass.set_bind_group(2, texture.bind_group(), &[]);
             }
-            None => ()
+            None => (),
         }
-        
+
         render_pass.draw_indexed(0..mesh.indices().len() as u32, 0, 0..1);
         //render_pass.draw(0..3, 0..1);
     }

@@ -10,5 +10,6 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 );
 
 pub fn is_texture_hdr(texture_format: wgpu::TextureFormat) -> bool {
-    return texture_format == wgpu::TextureFormat::Rgba32Float || texture_format == wgpu::TextureFormat::Rgba16Float;
+    return texture_format == wgpu::TextureFormat::Rgba32Float
+        || texture_format == wgpu::TextureFormat::Rgba16Float;
 }

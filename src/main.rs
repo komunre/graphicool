@@ -1,9 +1,6 @@
+use winit::event_loop::{ControlFlow, EventLoop};
 
-use winit::
-    event_loop::{ControlFlow, EventLoop}
-;
-
-use graphicool::engine::resources::{provider::*};
+use graphicool::engine::resources::provider::*;
 use graphicool::GraphicalApplication;
 
 fn main() {
@@ -26,7 +23,6 @@ fn main() {
     // another event arrives. Helps to keep CPU utilization low if nothing
     // is happening
 
-    let mut app = pollster::block_on(GraphicalApplication::new(DefaultResourceProvider{}));
+    let mut app = pollster::block_on(GraphicalApplication::new(DefaultResourceProvider {}));
     event_loop.run_app(&mut app).unwrap();
-
 }
